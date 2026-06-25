@@ -1,4 +1,19 @@
 import numpy as np
+import os
+import json
+
+CALIBRATION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'teng_calibration.json')
+
+def get_k_amp():
+    """Loads the TENG model calibration correction factor k_amp if it exists."""
+    if os.path.exists(CALIBRATION_FILE):
+        try:
+            with open(CALIBRATION_FILE, 'r') as f:
+                data = json.load(f)
+                return data.get('k_amp', 1.0)
+        except Exception:
+            return 1.0
+    return 1.0
 
 def calculate_solar_power(irradiance, ambient_temp, area=500.0, eta_pv=0.20, tau_teng=0.90, beta=0.004, NOCT=45.0, T_ref=25.0):
     """
@@ -83,7 +98,7 @@ def calculate_teng_power(rainfall_rate, area=500.0, eta_teng=0.025, rho_water=10
     p_elec_raw = area * p_mech_density * eta_teng
     
     # 8. Amplified power due to 3D vertical stacked layers & nano-structuring (kW)
-    p_teng_kw = (p_elec_raw * amplification_factor) / 1000.0
+    p_teng_kw = (p_elec_raw * amplification_factor * get_k_amp()) / 1000.0
     
     return float(p_teng_kw)
 
@@ -159,6 +174,34 @@ class BatteryStorage:
             
         return actual_power_exchanged, lost_power
 
+class WindTurbine:
+    """
+    Models a Wind Turbine Generator using the aerodynamic power equation:
+    P = 0.5 * rho * A * Cp * v^3
+    """
+    def __init__(self, radius=2.0, Cp=0.35, rho=1.225, cut_in=3.0, rated=12.0, cut_out=25.0):
+        self.radius = radius
+        self.Cp = Cp
+        self.rho = rho
+        self.cut_in = cut_in
+        self.rated = rated
+        self.cut_out = cut_out
+        self.area = np.pi * (radius ** 2)
+        
+    def calculate_power(self, wind_speed):
+        """
+        Calculates wind power generated in kW.
+        
+        If wind_speed is below cut-in or above cut-out, power is 0.
+        If wind_speed is between rated and cut-out, power is capped at the rated power (v = 12 m/s).
+        """
+        if wind_speed < self.cut_in or wind_speed > self.cut_out:
+            return 0.0
+        
+        v_calc = min(wind_speed, self.rated)
+        p_w = 0.5 * self.rho * self.area * self.Cp * (v_calc ** 3)
+        return p_w / 1000.0
+
 if __name__ == "__main__":
     # Unit tests to verify the physics calculations
     print("Testing models...")
@@ -180,3 +223,16 @@ if __name__ == "__main__":
     print(f"Charged 50 kW: Actual Power In = {act:.2f} kW, SOC = {bat.soc*100:.1f}%")
     act, lost = bat.step(net_power=-100.0) # Discharge (limited by max rate of 60 kW)
     print(f"Discharge demand 100 kW (limited): Actual Power Out = {act:.2f} kW, SOC = {bat.soc*100:.1f}%")
+    
+    # Wind Turbine test
+    wt = WindTurbine()
+    print(f"Wind Turbine Output at 2 m/s (below cut-in): {wt.calculate_power(2.0):.2f} kW")
+    print(f"Wind Turbine Output at 8 m/s: {wt.calculate_power(8.0):.2f} kW")
+    print(f"Wind Turbine Output at 12 m/s (rated): {wt.calculate_power(12.0):.2f} kW")
+    print(f"Wind Turbine Output at 15 m/s (above rated): {wt.calculate_power(15.0):.2f} kW")
+    print(f"Wind Turbine Output at 26 m/s (above cut-out): {wt.calculate_power(26.0):.2f} kW")
+    assert wt.calculate_power(8.0) > 0, "Wind power at 8 m/s should be positive"
+    assert wt.calculate_power(12.0) == wt.calculate_power(15.0), "Wind power should be capped at rated speed"
+    assert wt.calculate_power(2.0) == 0.0, "Wind power below cut-in should be 0"
+    assert wt.calculate_power(26.0) == 0.0, "Wind power above cut-out should be 0"
+

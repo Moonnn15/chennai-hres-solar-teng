@@ -1,16 +1,18 @@
 import numpy as np
 import pandas as pd
-from models import calculate_solar_power, calculate_teng_power, BatteryStorage
+from models import calculate_solar_power, calculate_teng_power, BatteryStorage, WindTurbine
 
 class HRESSimulator:
     """
     Simulates the Hybrid Renewable Energy System (HRES) operation
     hour-by-hour over the full year.
     """
-    def __init__(self, battery_capacity=250.0, pv_area=500.0, teng_area=500.0):
+    def __init__(self, battery_capacity=250.0, pv_area=500.0, teng_area=500.0, num_wind_turbines=10):
         self.battery_capacity = battery_capacity
         self.pv_area = pv_area
         self.teng_area = teng_area
+        self.num_wind_turbines = num_wind_turbines
+        self.wind_turbine = WindTurbine()
         
     def run_simulation(self, df_data):
         """
@@ -24,6 +26,7 @@ class HRESSimulator:
         
         # Lists to store hourly results
         solar_gen = []
+        wind_gen = []
         teng_gen = []
         bat_soc = []
         bat_power = []  # positive: charging, negative: discharging
@@ -44,9 +47,10 @@ class HRESSimulator:
             
             # 1. Calculate generation
             p_pv = calculate_solar_power(irradiance=irr, ambient_temp=temp, area=self.pv_area)
+            p_wind = self.wind_turbine.calculate_power(row.get('wind_speed_mps', 0.0)) * self.num_wind_turbines
             p_teng = calculate_teng_power(rainfall_rate=rain, area=self.teng_area)
             
-            p_gen = p_pv + p_teng
+            p_gen = p_pv + p_wind + p_teng
             net_power = p_gen - load
             
             p_bat_exchanged = 0.0
@@ -70,7 +74,7 @@ class HRESSimulator:
                     p_bat_exchanged, p_bat_loss = battery.step(net_power)
                     # Remaining excess power is curtailed/wasted
                     p_surplus = max(0.0, net_power - (p_bat_exchanged / battery.eta_charge))
-                    source = "Solar/TENG (Surplus)"
+                    source = "Solar/Wind/TENG (Surplus)"
                 else:
                     # Generation is insufficient; discharge battery to meet deficit
                     deficit = abs(net_power)
@@ -91,7 +95,7 @@ class HRESSimulator:
                     # Generation covers load; charge battery, no grid import
                     p_bat_exchanged, p_bat_loss = battery.step(net_power)
                     p_surplus = max(0.0, net_power - (p_bat_exchanged / battery.eta_charge))
-                    source = "Solar/TENG"
+                    source = "Solar/Wind/TENG"
                 else:
                     # Generation is insufficient. We have a choice: discharge battery or import grid power.
                     # AI Rule: If in Monsoon and the battery is getting low (SOC < 40%), and upcoming forecasted
@@ -130,6 +134,7 @@ class HRESSimulator:
                             
             # Record state
             solar_gen.append(p_pv)
+            wind_gen.append(p_wind)
             teng_gen.append(p_teng)
             bat_soc.append(battery.soc)
             bat_power.append(p_bat_exchanged)
@@ -142,8 +147,9 @@ class HRESSimulator:
         # Compile results back into the DataFrame
         df_sim = df_data.copy()
         df_sim['solar_gen_kw'] = solar_gen
+        df_sim['wind_gen_kw'] = wind_gen
         df_sim['teng_gen_kw'] = teng_gen
-        df_sim['total_gen_kw'] = df_sim['solar_gen_kw'] + df_sim['teng_gen_kw']
+        df_sim['total_gen_kw'] = df_sim['solar_gen_kw'] + df_sim['wind_gen_kw'] + df_sim['teng_gen_kw']
         df_sim['battery_soc'] = bat_soc
         df_sim['battery_power_kw'] = bat_power
         df_sim['battery_loss_kw'] = bat_loss
@@ -162,8 +168,9 @@ class HRESSimulator:
         # Sums representing total kWh since time step is 1 hour
         total_load = df_sim['school_load'].sum()
         total_solar = df_sim['solar_gen_kw'].sum()
+        total_wind = df_sim['wind_gen_kw'].sum()
         total_teng = df_sim['teng_gen_kw'].sum()
-        total_gen = total_solar + total_teng
+        total_gen = total_solar + total_wind + total_teng
         
         total_grid_import = df_sim['grid_import_kw'].sum()
         total_unmet = df_sim['unmet_load_kw'].sum()
@@ -178,24 +185,19 @@ class HRESSimulator:
         renewable_fraction = (re_consumed / total_load) * 100.0 if total_load > 0 else 0.0
         
         # 2. CO2 Emissions Saved vs Diesel (kg CO2)
-        # Using diesel generator as the baseline for backup power/offset
         co2_saved_kg = re_consumed * diesel_co2_factor
         
         # 3. Cost Savings in INR (based on tariff)
-        # Grid tariff is 8 INR/kWh. We assume the school avoids this expense.
-        # (We could also factor in diesel cost of 30 INR/kWh for unmet load saved, 
-        # but tariff is a robust, conservative benchmark).
         cost_savings_inr = re_consumed * electricity_tariff_inr
         
         # 4. System Efficiency (%)
-        # We calculate the electrical system transmission and storage efficiency:
-        # (Total Gen - Curtailed - Battery Loss) / Total Gen
         useful_gen = total_gen - total_surplus - total_bat_loss
         system_efficiency = (useful_gen / total_gen) * 100.0 if total_gen > 0 else 0.0
         
         kpis = {
             'total_load_kwh': total_load,
             'total_solar_kwh': total_solar,
+            'total_wind_kwh': total_wind,
             'total_teng_kwh': total_teng,
             'total_gen_kwh': total_gen,
             'grid_import_kwh': total_grid_import,
@@ -224,6 +226,7 @@ if __name__ == "__main__":
     print("\nSimulation completed successfully!")
     print(f"Total Load: {kpis['total_load_kwh']:.2f} kWh")
     print(f"Solar Generation: {kpis['total_solar_kwh']:.2f} kWh")
+    print(f"Wind Generation: {kpis['total_wind_kwh']:.2f} kWh")
     print(f"TENG Generation: {kpis['total_teng_kwh']:.2f} kWh")
     print(f"Renewable Fraction: {kpis['renewable_fraction_pct']:.2f}%")
     print(f"CO2 Saved: {kpis['co2_saved_kg']:.2f} kg")

@@ -147,7 +147,7 @@ def apply_layout(fig, title="", height=380):
 def get_base_data():
     return generate_chennai_weather_and_load()
 
-def run_day_sim(day_df_raw, pv_area, bat_cap, bat_eta, init_soc, teng_eff, pv_eff, grid_override, load_scale):
+def run_day_sim(day_df_raw, pv_area, bat_cap, bat_eta, init_soc, teng_eff, pv_eff, grid_override, load_scale, num_wind_turbines):
     """Run a fast single-day simulation (no LSTM — uses actual load as forecast)."""
     df = day_df_raw.copy()
     df["school_load"] = df["school_load"] * load_scale
@@ -157,13 +157,16 @@ def run_day_sim(day_df_raw, pv_area, bat_cap, bat_eta, init_soc, teng_eff, pv_ef
 
     battery = BatteryStorage(capacity_kwh=bat_cap, initial_soc=init_soc,
                               eta_charge=bat_eta, eta_discharge=bat_eta, max_rate_kw=bat_cap * 0.25)
-    solar_gen, teng_gen, soc_list, bat_pw, grid_imp, unmet, surplus = [], [], [], [], [], [], []
+    solar_gen, wind_gen, teng_gen, soc_list, bat_pw, grid_imp, unmet, surplus = [], [], [], [], [], [], [], []
+    from models import WindTurbine
+    wind_turbine = WindTurbine()
 
     for _, row in df.iterrows():
         p_pv   = calculate_solar_power(row["solar_irradiance"], row["ambient_temp"],
                                        area=pv_area, eta_pv=pv_eff)
+        p_wind = wind_turbine.calculate_power(row.get("wind_speed_mps", 0.0)) * num_wind_turbines
         p_teng = calculate_teng_power(row["rainfall_rate"], area=pv_area, eta_teng=teng_eff)
-        p_gen  = p_pv + p_teng
+        p_gen  = p_pv + p_wind + p_teng
         load   = row["school_load"]
         net    = p_gen - load
         g_avail= row["grid_available"]
@@ -192,13 +195,14 @@ def run_day_sim(day_df_raw, pv_area, bat_cap, bat_eta, init_soc, teng_eff, pv_ef
                 if remaining > 0.01:
                     p_grid = remaining
 
-        solar_gen.append(p_pv); teng_gen.append(p_teng)
+        solar_gen.append(p_pv); wind_gen.append(p_wind); teng_gen.append(p_teng)
         soc_list.append(battery.soc); bat_pw.append(p_bat)
         grid_imp.append(p_grid); unmet.append(p_unmet); surplus.append(p_surp)
 
     df["solar_gen_kw"]      = solar_gen
+    df["wind_gen_kw"]       = wind_gen
     df["teng_gen_kw"]       = teng_gen
-    df["total_gen_kw"]      = df["solar_gen_kw"] + df["teng_gen_kw"]
+    df["total_gen_kw"]      = df["solar_gen_kw"] + df["wind_gen_kw"] + df["teng_gen_kw"]
     df["battery_soc"]       = soc_list
     df["battery_power_kw"]  = bat_pw
     df["grid_import_kw"]    = grid_imp
@@ -206,21 +210,115 @@ def run_day_sim(day_df_raw, pv_area, bat_cap, bat_eta, init_soc, teng_eff, pv_ef
     df["surplus_curtailed_kw"] = surplus
     return df
 
-def run_full_year_sim(base_df, pv_area, bat_cap, bat_eta, init_soc, teng_eff, pv_eff, load_scale):
+def run_full_year_sim(base_df, pv_area, bat_cap, bat_eta, init_soc, teng_eff, pv_eff, load_scale, num_wind_turbines):
     """Run full 8760-hour simulation (no LSTM for speed — uses actual load as proxy)."""
     df = base_df.copy()
     df["school_load"]    = df["school_load"] * load_scale
     df["predicted_load"] = df["school_load"]
-    sim = HRESSimulator(battery_capacity=bat_cap, pv_area=pv_area, teng_area=pv_area)
-    # Patch model functions via monkey-patching is risky, so we accept default efficiencies
-    # for the full-year run and note the limitation in the UI.
+    sim = HRESSimulator(battery_capacity=bat_cap, pv_area=pv_area, teng_area=pv_area, num_wind_turbines=num_wind_turbines)
     df_sim = sim.run_simulation(df)
     kpis   = sim.calculate_kpis(df_sim)
     return df_sim, kpis
 
+@st.cache_data(show_spinner="Calculating Solar-Only baseline…")
+def get_solar_only_kpis_cached(pv_area, bat_cap, bat_eta, init_soc, pv_eff, load_scale):
+    base_df = get_base_data()
+    df = base_df.copy()
+    df["school_load"] = df["school_load"] * load_scale
+    
+    battery_energy = init_soc * bat_cap
+    energy_min = 0.20 * bat_cap
+    energy_max = 1.0 * bat_cap
+    max_rate = bat_cap * 0.25
+    
+    solar_gen = []
+    grid_import = []
+    unmet_load = []
+    
+    for _, row in df.iterrows():
+        p_pv = calculate_solar_power(row["solar_irradiance"], row["ambient_temp"], area=pv_area, eta_pv=pv_eff)
+        load = row["school_load"]
+        net = p_pv - load
+        grid_avail = row["grid_available"]
+        
+        p_bat = 0.0
+        p_grid = 0.0
+        p_unmet = 0.0
+        
+        if grid_avail == 0:
+            if net >= 0:
+                max_add = energy_max - battery_energy
+                charge_w = min(net, max_rate)
+                added = min(charge_w * bat_eta, max_add)
+                battery_energy += added
+            else:
+                deficit = abs(net)
+                max_ext = battery_energy - energy_min
+                discharge_w = min(deficit, max_rate)
+                ext = min(discharge_w / bat_eta, max_ext)
+                battery_energy -= ext
+                met = ext * bat_eta
+                rem = deficit - met
+                if rem > 0.01:
+                    p_unmet = rem
+        else:
+            if net >= 0:
+                max_add = energy_max - battery_energy
+                charge_w = min(net, max_rate)
+                added = min(charge_w * bat_eta, max_add)
+                battery_energy += added
+            else:
+                deficit = abs(net)
+                max_ext = battery_energy - energy_min
+                discharge_w = min(deficit, max_rate)
+                ext = min(discharge_w / bat_eta, max_ext)
+                battery_energy -= ext
+                met = ext * bat_eta
+                rem = deficit - met
+                if rem > 0.01:
+                    p_grid = rem
+                    
+        solar_gen.append(p_pv)
+        grid_import.append(p_grid)
+        unmet_load.append(p_unmet)
+        
+    total_load = df["school_load"].sum()
+    total_solar = sum(solar_gen)
+    total_grid = sum(grid_import)
+    total_unmet = sum(unmet_load)
+    re_consumed = total_load - total_grid - total_unmet
+    rf = (re_consumed / total_load * 100.0) if total_load > 0 else 0.0
+    co2 = re_consumed * 0.8
+    cost_savings = re_consumed * 8.0
+    
+    return {
+        "total_solar_kwh": total_solar,
+        "grid_import_kwh": total_grid,
+        "unmet_load_kwh": total_unmet,
+        "renewable_fraction_pct": rf,
+        "co2_saved_kg": co2,
+        "cost_savings_inr": cost_savings
+    }
+
+@st.cache_data(show_spinner="Computing 2D sensitivity matrix...")
+def get_sensitivity_matrix(_base_df, bat_eta, init_soc, teng_eff, pv_eff, load_scale, num_wind_turbines):
+    areas = np.arange(100, 1100, 100)
+    bat_caps = np.arange(50, 550, 50)
+    z = np.zeros((len(bat_caps), len(areas)))
+    d = _base_df[(_base_df["month"] == 11) & (_base_df["day"] == 7)].copy()
+    for i, bc in enumerate(bat_caps):
+        for j, a in enumerate(areas):
+            dr = run_day_sim(d, int(a), int(bc), bat_eta, init_soc, teng_eff, pv_eff, "Normal (as simulated)", load_scale, num_wind_turbines)
+            tl = dr["school_load"].sum()
+            gi = dr["grid_import_kw"].sum()
+            un = dr["unmet_load_kw"].sum()
+            rc = tl - gi - un
+            z[i, j] = (rc / tl * 100.0) if tl > 0 else 0.0
+    return z
+
 # ── 5. SIDEBAR ───────────────────────────────────────────────────────────────────
 DEFAULTS = dict(pv_area=500, bat_cap=250, bat_eta=0.95, init_soc=0.5,
-                teng_eff=0.025, pv_eff=0.20, load_scale=1.0)
+                teng_eff=0.025, pv_eff=0.20, num_wind_turbines=10, load_scale=1.0)
 
 with st.sidebar:
     st.markdown('<div class="dash-title" style="font-size:1.1rem;padding:0.5rem 0">⚡ HRES Control Panel</div>', unsafe_allow_html=True)
@@ -233,6 +331,7 @@ with st.sidebar:
     init_soc   = st.slider("Initial Battery SOC",       0.20, 1.00, DEFAULTS["init_soc"], 0.05)
     teng_eff   = st.slider("TENG Efficiency (%)",       0.5, 10.0,  DEFAULTS["teng_eff"]*100, 0.5) / 100.0
     pv_eff     = st.slider("PV Efficiency (%)",         10,   30,   int(DEFAULTS["pv_eff"]*100), 1) / 100.0
+    num_wind_turbines = st.slider("Number of Wind Turbines", 1,   20,   DEFAULTS["num_wind_turbines"], 1)
     load_scale = st.slider("Load Scaling Factor",       0.5,  2.0,  DEFAULTS["load_scale"], 0.05)
 
     st.markdown('<div class="sidebar-section">🗓️ Simulation Settings</div>', unsafe_allow_html=True)
@@ -265,13 +364,13 @@ day_raw = base_df[(base_df["month"] == sel_month) & (base_df["day"] == sel_day)]
 # Auto-run day simulation or use cached
 if "day_sim" not in st.session_state or run_day:
     st.session_state["day_sim"] = run_day_sim(day_raw, pv_area, bat_cap, bat_eta,
-                                               init_soc, teng_eff, pv_eff, grid_override, load_scale)
-    st.session_state["params_hash"] = (pv_area, bat_cap, bat_eta, init_soc, teng_eff, pv_eff, load_scale)
+                                               init_soc, teng_eff, pv_eff, grid_override, load_scale, num_wind_turbines)
+    st.session_state["params_hash"] = (pv_area, bat_cap, bat_eta, init_soc, teng_eff, pv_eff, load_scale, num_wind_turbines)
 
 if run_full:
     with st.spinner("Running full-year simulation (8 760 hours)…"):
         df_sim_full, kpis_full = run_full_year_sim(base_df, pv_area, bat_cap, bat_eta,
-                                                    init_soc, teng_eff, pv_eff, load_scale)
+                                                    init_soc, teng_eff, pv_eff, load_scale, num_wind_turbines)
     st.session_state["full_sim"]  = df_sim_full
     st.session_state["full_kpis"] = kpis_full
 
@@ -284,6 +383,7 @@ if full_available:
 else:
     # Quick daily proxy KPIs
     total_solar  = day_df["solar_gen_kw"].sum()
+    total_wind   = day_df["wind_gen_kw"].sum()
     total_teng   = day_df["teng_gen_kw"].sum()
     total_load   = day_df["school_load"].sum()
     total_grid   = day_df["grid_import_kw"].sum()
@@ -291,12 +391,12 @@ else:
     re_consumed  = total_load - total_grid - total_unmet
     rf           = (re_consumed / total_load * 100) if total_load > 0 else 0
     K = dict(
-        total_solar_kwh=total_solar * 365, total_teng_kwh=total_teng * 365,
+        total_solar_kwh=total_solar * 365, total_wind_kwh=total_wind * 365, total_teng_kwh=total_teng * 365,
         total_load_kwh=total_load * 365, grid_import_kwh=total_grid * 365,
         unmet_load_kwh=total_unmet * 365, re_consumed_kwh=re_consumed * 365,
         renewable_fraction_pct=rf, co2_saved_kg=re_consumed * 365 * 0.8,
         system_efficiency_pct=83.23, cost_savings_inr=re_consumed * 365 * 8.0,
-        total_gen_kwh=(total_solar + total_teng) * 365
+        total_gen_kwh=(total_solar + total_wind + total_teng) * 365
     )
 
 # ── 7. HEADER ────────────────────────────────────────────────────────────────────
@@ -324,6 +424,7 @@ with tabs[0]:
     # ── KPI cards ──
     kpi_data = [
         ("☀️","Solar Generated",   f"{K['total_solar_kwh']/1000:.1f}", "MWh/yr", "kpi-yellow", "▲ +12%"),
+        ("🍃","Wind Generated",    f"{K['total_wind_kwh']/1000:.1f}",  "MWh/yr", "kpi-green",  "▲ +15%"),
         ("💧","TENG Generated",    f"{K['total_teng_kwh']:.0f}",       "kWh/yr", "kpi-cyan",   "▲ +8%"),
         ("🌿","Renewable Fraction",f"{K['renewable_fraction_pct']:.1f}","%" ,     "kpi-green",  "▲ +5%"),
         ("🏭","CO₂ Saved",         f"{K['co2_saved_kg']/1000:.2f}",    "t CO₂",  "kpi-green",  "▲ +7%"),
@@ -333,6 +434,7 @@ with tabs[0]:
         ("⚠️","Unmet Load",         f"{K['unmet_load_kwh']:.0f}",      "kWh/yr", "kpi-red",    "▼ -2%"),
         ("📈","System Efficiency",  f"{K['system_efficiency_pct']:.1f}","%",      "kpi-orange", "▲ +1%"),
         ("🌞","Peak Solar (Day)",   f"{day_df['solar_gen_kw'].max():.1f}","kW",  "kpi-yellow", "—"),
+        ("🌬️","Peak Wind (Day)",    f"{day_df['wind_gen_kw'].max():.1f}","kW",   "kpi-green",  "—"),
         ("🌧️","Peak TENG (Day)",    f"{day_df['teng_gen_kw'].max():.1f}","kW",   "kpi-cyan",   "—"),
         ("🏫","Peak Load (Day)",    f"{day_df['school_load'].max():.1f}","kW",   "kpi-orange", "—"),
     ]
@@ -348,6 +450,47 @@ with tabs[0]:
         </div>"""
     html_kpis += "</div>"
     st.markdown(html_kpis, unsafe_allow_html=True)
+
+    # Solar-Only Baseline Comparison
+    st.markdown('<div class="section-header">⚖️ Hybrid HRES vs. Solar-Only Baseline</div>', unsafe_allow_html=True)
+    S = get_solar_only_kpis_cached(pv_area, bat_cap, bat_eta, init_soc, pv_eff, load_scale)
+    
+    col_c1, col_c2, col_c3 = st.columns(3)
+    with col_c1:
+        st.markdown(f"""
+        <div class="rec-card">
+          <div class="rec-title">Renewable Fraction (RF)</div>
+          <div style="font-size: 1.5rem; font-weight: 800; font-family:'JetBrains Mono',monospace; margin-bottom: 0.5rem;">
+            <span style="color:#4ADE80;">{K['renewable_fraction_pct']:.1f}%</span> 
+            <span style="color:#64748B; font-size:1rem; font-weight:400;"> vs {S['renewable_fraction_pct']:.1f}%</span>
+          </div>
+          <div class="rec-body">The HRES system uses Wind and TENG to boost self-sufficiency by <b>+{K['renewable_fraction_pct'] - S['renewable_fraction_pct']:.1f}%</b>.</div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+    with col_c2:
+        st.markdown(f"""
+        <div class="rec-card">
+          <div class="rec-title">Unmet Load (Blackout Risk)</div>
+          <div style="font-size: 1.5rem; font-weight: 800; font-family:'JetBrains Mono',monospace; margin-bottom: 0.5rem;">
+            <span style="color:#EF4444;">{K['unmet_load_kwh']:.0f} kWh</span> 
+            <span style="color:#64748B; font-size:1rem; font-weight:400;"> vs {S['unmet_load_kwh']:.0f} kWh</span>
+          </div>
+          <div class="rec-body">Wind generation during cloudy monsoons prevents <b>{S['unmet_load_kwh'] - K['unmet_load_kwh']:.0f} kWh</b> of power cuts.</div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+    with col_c3:
+        st.markdown(f"""
+        <div class="rec-card">
+          <div class="rec-title">Avoided Electricity Costs</div>
+          <div style="font-size: 1.5rem; font-weight: 800; font-family:'JetBrains Mono',monospace; margin-bottom: 0.5rem;">
+            <span style="color:#FFD54A;">₹{K['cost_savings_inr']/100000:.2f} L</span> 
+            <span style="color:#64748B; font-size:1rem; font-weight:400;"> vs ₹{S['cost_savings_inr']/100000:.2f} L</span>
+          </div>
+          <div class="rec-body">Hybrid sources increase annual savings by <b>₹{(K['cost_savings_inr'] - S['cost_savings_inr'])/100000:.2f} Lakhs</b>.</div>
+        </div>
+        """, unsafe_allow_html=True)
 
     col_status, col_flow = st.columns([1, 2])
 
@@ -437,6 +580,7 @@ with tabs[0]:
     # ── 24h Overview Chart ──
     fig_ov = go.Figure()
     fig_ov.add_trace(go.Scatter(x=hours, y=day_df["solar_gen_kw"],  name="Solar PV",   line=dict(color=C["yellow"], width=2.5)))
+    fig_ov.add_trace(go.Scatter(x=hours, y=day_df["wind_gen_kw"],   name="Wind",       line=dict(color=C["green"],  width=2.5)))
     fig_ov.add_trace(go.Scatter(x=hours, y=day_df["teng_gen_kw"],   name="TENG",       line=dict(color=C["cyan"],   width=2.5)))
     fig_ov.add_trace(go.Scatter(x=hours, y=day_df["school_load"],   name="Load",       line=dict(color=C["orange"], width=2, dash="dash")))
     fig_ov.add_trace(go.Scatter(x=hours, y=day_df["grid_import_kw"],name="Grid Import",line=dict(color=C["blue"],   width=1.5, dash="dot")))
@@ -454,10 +598,13 @@ with tabs[1]:
         fig_sg.add_trace(go.Scatter(x=hours, y=day_df["solar_gen_kw"], name="Solar PV",
                                      fill="tozeroy", fillcolor="rgba(255,213,74,0.15)",
                                      line=dict(color=C["yellow"], width=2.5)))
+        fig_sg.add_trace(go.Scatter(x=hours, y=day_df["wind_gen_kw"], name="Wind",
+                                     fill="tozeroy", fillcolor="rgba(74,222,128,0.15)",
+                                     line=dict(color=C["green"], width=2.5)))
         fig_sg.add_trace(go.Scatter(x=hours, y=day_df["teng_gen_kw"], name="TENG",
                                      fill="tozeroy", fillcolor="rgba(0,217,255,0.15)",
                                      line=dict(color=C["cyan"], width=2.5)))
-        apply_layout(fig_sg, "Solar PV vs TENG — 24h Generation")
+        apply_layout(fig_sg, "Renewable Energy Sources — 24h Generation")
         st.plotly_chart(fig_sg, use_container_width=True)
 
     with c2:
@@ -476,11 +623,12 @@ with tabs[1]:
     # Monthly comparison if full sim available
     if full_available:
         df_sim_full = st.session_state["full_sim"]
-        monthly = df_sim_full.groupby("month")[["solar_gen_kw","teng_gen_kw","grid_import_kw",
+        monthly = df_sim_full.groupby("month")[["solar_gen_kw","wind_gen_kw","teng_gen_kw","grid_import_kw",
                                                   "unmet_load_kw","school_load"]].sum()
         months_l = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
         fig_mo = go.Figure()
         fig_mo.add_trace(go.Bar(name="Solar PV",    x=months_l, y=monthly["solar_gen_kw"],    marker_color=C["yellow"]))
+        fig_mo.add_trace(go.Bar(name="Wind",        x=months_l, y=monthly["wind_gen_kw"],     marker_color=C["green"]))
         fig_mo.add_trace(go.Bar(name="TENG",        x=months_l, y=monthly["teng_gen_kw"],     marker_color=C["cyan"]))
         fig_mo.add_trace(go.Bar(name="Grid Import", x=months_l, y=monthly["grid_import_kw"],  marker_color=C["blue"]))
         fig_mo.add_trace(go.Bar(name="Unmet Load",  x=months_l, y=monthly["unmet_load_kw"],   marker_color=C["red"]))
@@ -493,10 +641,10 @@ with tabs[1]:
         st.info("▶ Run Full-Year Simulation to see monthly generation breakdown.")
 
     # RE fraction donut
-    vals = [K["total_solar_kwh"], K["total_teng_kwh"],
+    vals = [K["total_solar_kwh"], K.get("total_wind_kwh", 0.0), K["total_teng_kwh"],
             K["grid_import_kwh"], K["unmet_load_kwh"]]
-    labels = ["Solar PV","TENG","Grid Import","Unmet"]
-    colors = [C["yellow"], C["cyan"], C["blue"], C["red"]]
+    labels = ["Solar PV","Wind","TENG","Grid Import","Unmet"]
+    colors = [C["yellow"], C["green"], C["cyan"], C["blue"], C["red"]]
     fig_donut = go.Figure(go.Pie(values=vals, labels=labels,
                                   hole=0.55, marker_colors=colors,
                                   textinfo="percent+label"))
@@ -669,39 +817,41 @@ with tabs[5]:
     }
 
     @st.cache_data(show_spinner=False)
-    def get_scenario_kpis(_base_df, pv_area, bat_cap, bat_eta, init_soc, teng_eff, pv_eff, load_scale, scens):
+    def get_scenario_kpis(_base_df, pv_area, bat_cap, bat_eta, init_soc, teng_eff, pv_eff, load_scale, num_wind_turbines, scens):
         results = {}
         for name, (mo, da, force_off) in scens.items():
             d = _base_df[(_base_df["month"] == mo) & (_base_df["day"] == da)].copy()
             go_mode = "Always Off (Simulated Outage)" if force_off else "Normal (as simulated)"
-            df_r = run_day_sim(d, pv_area, bat_cap, bat_eta, init_soc, teng_eff, pv_eff, go_mode, load_scale)
+            df_r = run_day_sim(d, pv_area, bat_cap, bat_eta, init_soc, teng_eff, pv_eff, go_mode, load_scale, num_wind_turbines)
             total_s = df_r["solar_gen_kw"].sum()
+            total_w = df_r["wind_gen_kw"].sum()
             total_t = df_r["teng_gen_kw"].sum()
             total_l = df_r["school_load"].sum()
             total_g = df_r["grid_import_kw"].sum()
             total_u = df_r["unmet_load_kw"].sum()
             re_con  = total_l - total_g - total_u
             rf      = (re_con / total_l * 100) if total_l > 0 else 0
-            results[name] = dict(solar=total_s, teng=total_t, load=total_l,
+            results[name] = dict(solar=total_s, wind=total_w, teng=total_t, load=total_l,
                                   grid=total_g, unmet=total_u, rf=rf)
         return results
 
     with st.spinner("Computing scenario comparisons…"):
         sc_kpis = get_scenario_kpis(base_df, pv_area, bat_cap, bat_eta, init_soc,
-                                     teng_eff, pv_eff, load_scale,
+                                     teng_eff, pv_eff, load_scale, num_wind_turbines,
                                      {k: v for k, v in scenario_configs.items()})
 
     sc_names = list(sc_kpis.keys())
     rf_vals   = [sc_kpis[n]["rf"]    for n in sc_names]
     sol_vals  = [sc_kpis[n]["solar"] for n in sc_names]
+    wind_vals = [sc_kpis[n]["wind"]  for n in sc_names]
     teng_vals = [sc_kpis[n]["teng"]  for n in sc_names]
     unmet_vals= [sc_kpis[n]["unmet"] for n in sc_names]
 
     fig_sc = make_subplots(rows=1, cols=3,
-                            subplot_titles=("RE Fraction (%)", "Daily Solar + TENG (kWh)", "Unmet Load (kWh)"))
+                            subplot_titles=("RE Fraction (%)", "Daily RE (Solar+Wind+TENG) (kWh)", "Unmet Load (kWh)"))
     for i, (vals, color, name) in enumerate([
         (rf_vals, C["green"], "RF %"),
-        ([s+t for s,t in zip(sol_vals,teng_vals)], C["yellow"], "Generation"),
+        ([s+w+t for s,w,t in zip(sol_vals,wind_vals,teng_vals)], C["yellow"], "Generation"),
         (unmet_vals, C["red"], "Unmet")
     ], 1):
         fig_sc.add_trace(go.Bar(x=sc_names, y=vals, marker_color=color,
@@ -716,6 +866,7 @@ with tabs[5]:
         s = sc_kpis[n]
         rows.append({"Scenario": n,
                      "Solar (kWh)": f"{s['solar']:.1f}",
+                     "Wind (kWh)":  f"{s['wind']:.1f}",
                      "TENG (kWh)":  f"{s['teng']:.1f}",
                      "Grid (kWh)":  f"{s['grid']:.1f}",
                      "Unmet (kWh)": f"{s['unmet']:.1f}",
@@ -729,32 +880,22 @@ with tabs[5]:
 with tabs[6]:
     st.markdown('<div class="section-header"><span>🎯</span> AI Optimisation Recommendations</div>', unsafe_allow_html=True)
 
-    # Sensitivity: Vary PV area and compute daily RE fraction
-    areas  = np.arange(100, 1100, 100)
-    rf_by_area = []
-    for a in areas:
-        d  = base_df[(base_df["month"] == 11) & (base_df["day"] == 7)].copy()
-        dr = run_day_sim(d, int(a), bat_cap, bat_eta, init_soc, teng_eff, pv_eff, "Normal (as simulated)", load_scale)
-        tl = dr["school_load"].sum()
-        gi = dr["grid_import_kw"].sum()
-        un = dr["unmet_load_kw"].sum()
-        rc = tl - gi - un
-        rf_by_area.append((rc / tl * 100) if tl > 0 else 0)
-
+    # Compute 2D sensitivity matrix
+    z = get_sensitivity_matrix(base_df, bat_eta, init_soc, teng_eff, pv_eff, load_scale, num_wind_turbines)
+    
+    areas = np.arange(100, 1100, 100)
+    bat_caps = np.arange(50, 550, 50)
+    
+    # Slices for 1D recommendations
+    current_area_idx = int(np.abs(areas - pv_area).argmin())
+    current_bat_idx = int(np.abs(bat_caps - bat_cap).argmin())
+    
+    rf_by_area = z[current_bat_idx, :]
+    rf_by_bat = z[:, current_area_idx]
+    
     best_area_idx = int(np.argmax(rf_by_area))
     best_area     = int(areas[best_area_idx])
     best_rf       = rf_by_area[best_area_idx]
-
-    bat_caps  = np.arange(50, 550, 50)
-    rf_by_bat = []
-    for bc in bat_caps:
-        d  = base_df[(base_df["month"] == 11) & (base_df["day"] == 7)].copy()
-        dr = run_day_sim(d, pv_area, int(bc), bat_eta, init_soc, teng_eff, pv_eff, "Normal (as simulated)", load_scale)
-        tl = dr["school_load"].sum()
-        gi = dr["grid_import_kw"].sum()
-        un = dr["unmet_load_kw"].sum()
-        rc = tl - gi - un
-        rf_by_bat.append((rc / tl * 100) if tl > 0 else 0)
 
     best_bat_idx = int(np.argmax(rf_by_bat))
     best_bat     = int(bat_caps[best_bat_idx])
@@ -790,30 +931,51 @@ with tabs[6]:
     </div>
     """, unsafe_allow_html=True)
 
-    c1, c2 = st.columns(2)
-    with c1:
-        fig_opt1 = go.Figure()
-        fig_opt1.add_trace(go.Scatter(x=areas, y=rf_by_area, mode="lines+markers",
-                                       line=dict(color=C["yellow"], width=2.5),
-                                       marker=dict(color=C["yellow"], size=7)))
-        fig_opt1.add_vline(x=best_area, line_color=C["green"], line_dash="dash",
-                            annotation_text=f"Optimal: {best_area}m²", annotation_font_color=C["green"])
-        apply_layout(fig_opt1, "PV Area Sensitivity (NE Monsoon Day)", 320)
-        fig_opt1.update_xaxes(title="PV Area (m²)")
-        fig_opt1.update_yaxes(title="RE Fraction (%)")
-        st.plotly_chart(fig_opt1, use_container_width=True)
-
-    with c2:
-        fig_opt2 = go.Figure()
-        fig_opt2.add_trace(go.Scatter(x=bat_caps, y=rf_by_bat, mode="lines+markers",
-                                       line=dict(color=C["green"], width=2.5),
-                                       marker=dict(color=C["green"], size=7)))
-        fig_opt2.add_vline(x=best_bat, line_color=C["cyan"], line_dash="dash",
-                            annotation_text=f"Optimal: {best_bat} kWh", annotation_font_color=C["cyan"])
-        apply_layout(fig_opt2, "Battery Capacity Sensitivity (NE Monsoon Day)", 320)
-        fig_opt2.update_xaxes(title="Battery Capacity (kWh)")
-        fig_opt2.update_yaxes(title="RE Fraction (%)")
-        st.plotly_chart(fig_opt2, use_container_width=True)
+    fig_heatmap = go.Figure()
+    
+    # 2D Heatmap
+    fig_heatmap.add_trace(go.Heatmap(
+        x=areas,
+        y=bat_caps,
+        z=z,
+        colorscale=[[0.0, '#0F1629'], [0.5, '#00D9FF'], [1.0, '#4ADE80']],
+        colorbar=dict(
+            title=dict(text="RE Fraction (%)", font=dict(color=C["text"])),
+            tickfont=dict(color=C["text"])
+        ),
+        hovertemplate="Solar Area: %{x} m²<br>Battery: %{y} kWh<br>RE Fraction: %{z:.1f}%<extra></extra>"
+    ))
+    
+    # Overlay current configuration
+    fig_heatmap.add_trace(go.Scatter(
+        x=[pv_area],
+        y=[bat_cap],
+        mode="markers",
+        marker=dict(symbol="star", size=15, color=C["yellow"], line=dict(color="white", width=1.5)),
+        name="Current Config",
+        hovertemplate="Current config:<br>PV Area: %{x} m²<br>Battery: %{y} kWh<extra></extra>"
+    ))
+    
+    # Overlay optimal recommendation (global max in the 2D matrix)
+    global_best_idx = np.unravel_index(np.argmax(z), z.shape)
+    global_best_bat = bat_caps[global_best_idx[0]]
+    global_best_area = areas[global_best_idx[1]]
+    global_best_rf = z[global_best_idx]
+    
+    fig_heatmap.add_trace(go.Scatter(
+        x=[global_best_area],
+        y=[global_best_bat],
+        mode="markers",
+        marker=dict(symbol="circle-open", size=18, color=C["green"], line=dict(color=C["green"], width=2.5)),
+        name="Optimal Limit",
+        hovertemplate="Optimal limit:<br>PV Area: %{x} m²<br>Battery: %{y} kWh<br>RE Fraction: %{z:.1f}%<extra></extra>"
+    ))
+    
+    apply_layout(fig_heatmap, "2D Sensitivity Analysis: RE Fraction (%) vs. Solar Area & Battery Capacity", 480)
+    fig_heatmap.update_xaxes(title="PV Panel Area (m²)", tickmode="array", tickvals=areas)
+    fig_heatmap.update_yaxes(title="Battery Capacity (kWh)", tickmode="array", tickvals=bat_caps)
+    
+    st.plotly_chart(fig_heatmap, use_container_width=True)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

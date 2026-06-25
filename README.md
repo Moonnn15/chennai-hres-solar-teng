@@ -140,20 +140,37 @@ Input (24 timesteps × 8 features)
 
 # Simulation Results
 
-## Annual KPIs
+## Annual KPIs (with Hybrid HRES)
+
+The table below shows the annual performance KPIs under the default hybrid configuration (Solar PV + TENG + 10 Wind Turbines + Battery):
 
 | KPI | Value |
 |---|---|
-| Total Annual School Load | 203,751.85 kWh |
-| Solar Energy Generated | 109,135.21 kWh |
-| TENG Energy Generated | 2,499.88 kWh |
-| **Total Renewable Energy** | **111,635.09 kWh** |
-| Grid Import Required | 87,678.63 kWh |
-| Unmet Load (Outages) | 23,163.90 kWh |
-| **Renewable Energy Fraction** | **45.60%** |
-| **CO₂ Saved vs Diesel** | **74.33 tonnes/year** |
-| **System Efficiency** | **83.23%** |
-| **Annual Cost Savings** | **₹7,43,274.51** |
+| Total Annual School Load | 203,602.90 kWh |
+| Solar Energy Generated | 106,952.48 kWh |
+| Wind Energy Generated | 105,619.60 kWh |
+| TENG Energy Generated | 0.04 kWh |
+| **Total Renewable Energy** | **212,572.13 kWh** |
+| Grid Import Required | 46,957.96 kWh |
+| Unmet Load (Outages) | 332.02 kWh |
+| **Renewable Energy Fraction (RF)** | **76.77%** |
+| **CO₂ Saved vs Diesel** | **125.05 tonnes/year** |
+| **System Efficiency** | **73.66%** |
+| **Annual Cost Savings** | **₹12,50,503.36** |
+
+---
+
+## ⚖️ Hybrid HRES vs. Solar-Only Baseline
+
+To validate the benefits of the multi-source hybrid architecture, we compare the default Hybrid HRES configuration against a Solar-Only baseline (Solar PV + Battery) under identical climate load conditions:
+
+| Metric | Solar-Only Baseline | Hybrid HRES (Solar+Wind+TENG) | Improvement / Difference |
+|---|---|---|---|
+| **Renewable Fraction (RF)** | 43.33% | 76.77% | **+33.44% increase** |
+| **Unmet Load (Blackouts)** | 9,099.05 kWh | 332.02 kWh | **-96.3% reduction** |
+| **Avoided Grid Imports** | 106,272.63 kWh | 46,957.96 kWh | **-55.8% reduction** |
+| **Annual Cost Savings** | ₹7,05,849.67 | ₹12,50,503.36 | **+₹5,44,653.69 saved** |
+| **Annual CO₂ Avoided** | 70.58 tonnes | 125.05 tonnes | **+54.47 tonnes saved** |
 
 ---
 
@@ -181,13 +198,17 @@ Input (24 timesteps × 8 features)
 ```
 hres_simulation/
 │
-├── data_generator.py     # Chennai 4-season climate & school load data (8760 hrs)
-├── models.py             # Solar PV, Raindrop TENG & Battery physics models
-├── lstm_forecaster.py    # LSTM neural network for hourly AI load forecasting
-├── simulation.py         # Hourly dispatch loop, AI controller & KPI calculator
-├── run.py                # Master runner: trains LSTM, runs sim, exports graphs
+├── data_generator.py      # Chennai 4-season climate & school load data (8760 hrs)
+├── models.py              # Solar PV, Raindrop TENG, Wind Turbine & Battery models
+├── lstm_forecaster.py     # LSTM neural network for hourly AI load forecasting
+├── simulation.py          # Hourly dispatch loop, AI controller & KPI calculator
+├── run.py                 # Master runner: trains LSTM, runs sim, exports graphs
+├── dashboard_streamlit.py  # Interactive premium Streamlit dashboard wrapping the simulation
+├── Dockerfile             # Container configuration for Streamlit deployment
+├── docker-compose.yml     # Multi-container orchestration config
+├── run_app.bat            # One-click Windows batch setup helper
 │
-└── plots/                # Auto-generated high-resolution PNG outputs (300 DPI)
+└── plots/                 # Auto-generated high-resolution PNG outputs (300 DPI)
     ├── 1_solar_vs_teng_24h.png
     ├── 2_monthly_energy_comparison.png
     ├── 3_battery_charge_level.png
@@ -197,30 +218,57 @@ hres_simulation/
 
 ---
 
+# 🏗️ System Architecture
+
+Below is the visual system architecture and data flows of the Chennai HRES platform:
+
+```mermaid
+graph TD
+    A[Open-Meteo Weather API] -->|Historical Climate Data| B(Data Generator)
+    B -->|Rainfall, Wind Speed, Temp| C(Physics Simulation Loop)
+    B -->|Climate Features| D[LSTM Neural Network]
+    D -->|Predicted Load| E(AI Dispatch Controller)
+    C -->|Solar + Wind + TENG Power| E
+    E -->|Battery Charging/Discharging| F[Lithium-ion Battery]
+    E -->|Grid Energy Imports| G[Commercial Grid]
+    E -->|Unmet Load Tracking| H[KPI Engine]
+    H -->|Performance metrics & logs| I[Streamlit AI Dashboard]
+    H -->|Static HTML Dashboards| J[Web Interface]
+```
+
+---
+
 # Getting Started
 
-### Prerequisites
-
-```bash
-pip install numpy pandas matplotlib tensorflow scikit-learn
+### ⚡ Quick Start (Windows)
+Double-click `run_app.bat` or run it from command prompt:
+```cmd
+run_app.bat
 ```
+This script will check your Python installation, create a virtual environment, install dependencies, run the master runner, and start the Streamlit server automatically.
 
-### Run the Simulation
-
+### 🐳 Run with Docker (Recommended)
+You can deploy and run the interactive dashboard in a container:
 ```bash
-git clone https://github.com/YOUR_USERNAME/chennai-hres-solar-teng.git
-cd chennai-hres-solar-teng
-python run.py
+docker-compose up --build
 ```
+Once started, open `http://localhost:8501` in your browser.
 
-The script will:
-1. Generate the full year of Chennai climate + school load data
-2. Train the LSTM load forecasting model
-3. Run the 8,760-hour HRES dispatch simulation
-4. Print the performance KPI table
-5. Export all 5 graphs as 300 DPI PNG files to the `plots/` folder
+### 🐍 Manual Command Line Setup
+1. **Install Prerequisites**:
+   ```bash
+   pip install numpy pandas matplotlib tensorflow scikit-learn streamlit plotly
+   ```
+2. **Train & Run Simulation**:
+   ```bash
+   python run.py
+   ```
+3. **Launch the Dashboard**:
+   ```bash
+   streamlit run dashboard_streamlit.py
+   ```
 
-Expected runtime: **~5–10 minutes** (dominated by LSTM training)
+Expected runtime for first-time training: **~3–5 minutes**.
 
 ---
 

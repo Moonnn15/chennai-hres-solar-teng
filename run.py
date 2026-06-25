@@ -70,6 +70,7 @@ def main():
     print("==================================================================")
     print(f"Total Annual Load Demanded:       {kpis['total_load_kwh']:,.2f} kWh")
     print(f"Total Solar Energy Generated:      {kpis['total_solar_kwh']:,.2f} kWh")
+    print(f"Total Wind Energy Generated:       {kpis['total_wind_kwh']:,.2f} kWh")
     print(f"Total TENG Energy Generated:       {kpis['total_teng_kwh']:,.2f} kWh")
     print(f"Total Renewable Energy Generated:  {kpis['total_gen_kwh']:,.2f} kWh")
     print(f"Total Grid Import:                 {kpis['grid_import_kwh']:,.2f} kWh")
@@ -109,15 +110,16 @@ def main():
     save_plot('1_solar_vs_teng_24h.png')
     
     # --- GRAPH 2: Monthly energy generation comparison chart ---
-    monthly_data = df_sim.groupby('month')[['solar_gen_kw', 'teng_gen_kw', 'grid_import_kw', 'unmet_load_kw', 'school_load']].sum()
+    monthly_data = df_sim.groupby('month')[['solar_gen_kw', 'wind_gen_kw', 'teng_gen_kw', 'grid_import_kw', 'unmet_load_kw', 'school_load']].sum()
     months_labels = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
     
     plt.figure(figsize=(11, 7))
     # Stacked bar charts
     b1 = plt.bar(months_labels, monthly_data['solar_gen_kw'], label='Solar PV', color='#FFA726', width=0.6)
-    b2 = plt.bar(months_labels, monthly_data['teng_gen_kw'], bottom=monthly_data['solar_gen_kw'], label='TENG Film', color='#26C6DA', width=0.6)
-    b3 = plt.bar(months_labels, monthly_data['grid_import_kw'], bottom=monthly_data['solar_gen_kw'] + monthly_data['teng_gen_kw'], label='Grid Import', color='#78909C', width=0.6)
-    b4 = plt.bar(months_labels, monthly_data['unmet_load_kw'], bottom=monthly_data['solar_gen_kw'] + monthly_data['teng_gen_kw'] + monthly_data['grid_import_kw'], label='Unmet Load (Grid Cut)', color='#E53935', width=0.6)
+    b2 = plt.bar(months_labels, monthly_data['wind_gen_kw'], bottom=monthly_data['solar_gen_kw'], label='Wind Energy', color='#4CAF50', width=0.6)
+    b3 = plt.bar(months_labels, monthly_data['teng_gen_kw'], bottom=monthly_data['solar_gen_kw'] + monthly_data['wind_gen_kw'], label='TENG Film', color='#26C6DA', width=0.6)
+    b4 = plt.bar(months_labels, monthly_data['grid_import_kw'], bottom=monthly_data['solar_gen_kw'] + monthly_data['wind_gen_kw'] + monthly_data['teng_gen_kw'], label='Grid Import', color='#78909C', width=0.6)
+    b5 = plt.bar(months_labels, monthly_data['unmet_load_kw'], bottom=monthly_data['solar_gen_kw'] + monthly_data['wind_gen_kw'] + monthly_data['teng_gen_kw'] + monthly_data['grid_import_kw'], label='Unmet Load (Grid Cut)', color='#E53935', width=0.6)
     
     # School load line comparison
     plt.plot(months_labels, monthly_data['school_load'], label='Total School Load', color='#FF4081', marker='o', linewidth=2.5, markersize=6)
