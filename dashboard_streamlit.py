@@ -523,9 +523,9 @@ with tabs[2]:
                 bar=dict(color=C["green"]),
                 bgcolor=C["paper"],
                 bordercolor=C["grid"],
-                steps=[dict(range=[0,20], color=C["red"]+"33"),
-                       dict(range=[20,50], color=C["orange"]+"33"),
-                       dict(range=[50,100], color=C["green"]+"33")],
+                steps=[dict(range=[0,20], color="rgba(239, 68, 68, 0.2)"),
+                       dict(range=[20,50], color="rgba(251, 146, 60, 0.2)"),
+                       dict(range=[50,100], color="rgba(74, 222, 128, 0.2)")],
                 threshold=dict(line=dict(color=C["red"], width=2), thickness=0.75, value=20)
             ),
             number=dict(font=dict(color=C["green"], family="JetBrains Mono"), suffix="%")
@@ -546,8 +546,8 @@ with tabs[2]:
                                       line=dict(color=C["green"], width=2.5), name="SOC %"), row=1, col=1)
         bat_pos = day_df["battery_power_kw"].clip(lower=0)
         bat_neg = day_df["battery_power_kw"].clip(upper=0)
-        fig_bat.add_trace(go.Bar(x=hours, y=bat_pos, name="Charging",   marker_color=C["green"]+"99"), row=2, col=1)
-        fig_bat.add_trace(go.Bar(x=hours, y=bat_neg, name="Discharging",marker_color=C["red"]+"99"),   row=2, col=1)
+        fig_bat.add_trace(go.Bar(x=hours, y=bat_pos, name="Charging",   marker_color="rgba(74, 222, 128, 0.6)"), row=2, col=1)
+        fig_bat.add_trace(go.Bar(x=hours, y=bat_neg, name="Discharging",marker_color="rgba(239, 68, 68, 0.6)"),   row=2, col=1)
         fig_bat.update_layout(**PLOTLY_LAYOUT, height=400,
                                title=dict(text="Battery Charge/Discharge Cycle", font=dict(size=13)))
         st.plotly_chart(fig_bat, use_container_width=True)
