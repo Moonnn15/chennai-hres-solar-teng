@@ -353,7 +353,7 @@ with tabs[0]:
 
     with col_status:
         # Current simulation hour stats
-        peak_rain_hour = int(day_df["rainfall_rate"].idxmax()) if day_df["rainfall_rate"].max() > 0 else 12
+        peak_rain_hour = day_df["rainfall_rate"].idxmax().hour if day_df["rainfall_rate"].max() > 0 else 12
         max_rain = day_df["rainfall_rate"].max()
         max_solar = day_df["solar_gen_kw"].max()
         min_soc = day_df["battery_soc"].min()
