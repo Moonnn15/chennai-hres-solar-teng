@@ -1,5 +1,5 @@
-﻿__pycache__/
+__pycache__/
 *.pyc
 *.pyo
 output.log
-plots/
+
