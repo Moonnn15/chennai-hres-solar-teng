@@ -1,4 +1,4 @@
-# ⚡ Chennai Solar-TENG Hybrid Renewable Energy System (HRES) Simulation
+#  Chennai Solar-TENG Hybrid Renewable Energy System (HRES) Simulation
 
 <p align="center">
   <img src="plots/1_solar_vs_teng_24h.png" width="49%" />
@@ -15,7 +15,7 @@
 
 ---
 
-## 📌 Project Overview
+# Project Overview
 
 This project simulates a **Hybrid Renewable Energy System (HRES)** combining:
 
@@ -33,7 +33,7 @@ The TENG film fills this critical gap — generating electricity from the very r
 
 ---
 
-## 🌦️ Chennai Climate Model (4 Seasons)
+#  Chennai Climate Model (4 Seasons)
 
 | Season | Months | Solar Irradiance | Temperature | Rainfall | Grid Outages |
 |---|---|---|---|---|---|
@@ -44,9 +44,9 @@ The TENG film fills this critical gap — generating electricity from the very r
 
 ---
 
-## 🔬 Physical Models
+# Physical Models
 
-### Solar PV Power
+## Solar PV Power
 
 $$P_{pv} = A_{pv} \cdot \eta_{pv} \cdot \tau_{teng} \cdot \frac{G}{1000} \cdot \left[1 - \beta (T_{cell} - T_{ref})\right]$$
 
@@ -138,9 +138,9 @@ Input (24 timesteps × 8 features)
 
 ---
 
-## 📊 Simulation Results
+# Simulation Results
 
-### Annual KPIs
+## Annual KPIs
 
 | KPI | Value |
 |---|---|
@@ -197,7 +197,7 @@ hres_simulation/
 
 ---
 
-## 🚀 Getting Started
+# Getting Started
 
 ### Prerequisites
 
@@ -224,7 +224,7 @@ Expected runtime: **~5–10 minutes** (dominated by LSTM training)
 
 ---
 
-## 🏫 System Design Rationale
+## System Design Rationale
 
 Chennai's Northeast Monsoon (Oct–Dec) presents a unique dual challenge:
 - **Grid fails** due to flooding and storm damage
@@ -236,13 +236,13 @@ The **AI controller** detects upcoming monsoon grid-cut risk via the LSTM foreca
 
 ---
 
-## 📜 License
+##  License
 
 This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
 
 ---
 
-## 👨‍🔬 Author
+##  Author
 
 Built as a competition entry demonstrating the potential of hybrid nanogenerator systems for energy-resilient school infrastructure in climate-vulnerable urban areas of India.
 
